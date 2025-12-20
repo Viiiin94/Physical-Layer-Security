@@ -114,3 +114,41 @@ module pwm_Nfreq_Nstep(
     end
                     
 endmodule
+
+module five_s_timer(
+    input clk, reset_p,
+    output reg clk_sec,
+    output clk_sec_nedge, clk_sec_pedge
+    );
+    
+    // 32비트 정수형 (21억까지 저장 가능하므로 2.5억은 충분함)
+    integer cnt_sysclk;
+
+    always @(posedge clk, posedge reset_p) begin
+        if(reset_p) begin
+            cnt_sysclk <= 0;
+            clk_sec <= 0;
+        end
+        else begin
+            // 100MHz 기준: 250,000,000 = 2.5초
+            // 2.5초 Low -> 2.5초 High = 1주기 5초
+            if(cnt_sysclk >= 250_000_000 - 1) begin 
+                cnt_sysclk <= 0;
+                clk_sec <= ~clk_sec;
+            end
+            else begin
+                cnt_sysclk <= cnt_sysclk + 1;
+            end
+        end
+    end
+    
+    // [중요] 포트 연결 오류 수정됨
+    edge_detector_n ed(
+        .clk(clk), 
+        .reset_p(reset_p), 
+        .cp(clk_sec), 
+        .p_edge(clk_sec_pedge), // p_edge는 p_edge로 연결 
+        .n_edge(clk_sec_nedge)  // n_edge는 n_edge로 연결
+    );
+ 
+endmodule

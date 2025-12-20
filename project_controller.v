@@ -207,7 +207,7 @@ module bar_led(
              led_bar_out = 0;
         end
         else begin
-            if(s_button && reight_left)begin
+            if(reight_left)begin
                 if(clk_shift_counter == 10000000)begin
                     clk_shift_counter = 0;
                     shift = {shift[0], shift[5:1]};
@@ -225,7 +225,7 @@ module bar_led(
                     clk_shift_counter = clk_shift_counter + 1;
                 end           
             end
-            if(s_button && on_off_mode)begin
+            if(on_off_mode)begin
                 if (clk_counter < 100000000) begin
                     clk_counter = clk_counter + 1;
                     led_bar_out[5:0] = 0;
@@ -257,4 +257,183 @@ module bar_led(
             on_off_mode = 0;
         end
     end   
+endmodule
+
+module FSM_Controller(
+    input clk,
+    input reset_p,
+    input sw_launch,
+    input timer_done,
+    input sonic_sensor_ok,
+    input dht_sensor_ok,
+    
+    output reg timer_start,
+    output reg gate_open,
+    output reg [1:0] state_led
+    );
+
+    localparam IDLE   =  3'd0;
+    localparam SILENT =  3'd1;
+    localparam VERIFY =  3'd2;
+    localparam OPEN   =  3'd3;
+    localparam FAULT  =  3'd4;
+
+    reg [2:0] current_state, next_state;
+    integer state_clk;
+
+    // 1. 상태 레지스터
+    always @(posedge clk or posedge reset_p) begin
+        if(reset_p) current_state <= IDLE;
+        else    current_state <= next_state;
+    end
+
+    // 2. 다음 상태 결정
+    always @(*) begin
+        next_state = current_state;
+        state_clk = 0; 
+
+        case(current_state)
+            IDLE: begin
+                if(sw_launch) next_state = SILENT;
+            end
+            
+            SILENT: begin
+                if(timer_done) next_state = VERIFY;
+            end
+            
+            VERIFY: begin
+                if(sonic_sensor_ok && dht_sensor_ok) next_state = OPEN; 
+            end
+
+            OPEN: begin
+                // 센서 중 하나라도 꺼지면 에러 발생
+                if(state_clk >= 1_000_000)begin
+                    state_clk = 0;
+                    if(~sonic_sensor_ok || ~dht_sensor_ok) next_state = FAULT; 
+                end
+                else begin
+                    state_clk = state_clk + 1;
+                end
+            end  
+            
+            // [추가됨] FAULT 상태 처리
+            FAULT: begin
+                // 여기서 멈춰있음 (리셋 눌러야 탈출 가능)
+                next_state = FAULT;
+            end
+
+            default: next_state = IDLE;
+        endcase
+    end
+
+    // 3. 출력 로직 (Look-ahead Output)
+    always @(posedge clk or posedge reset_p) begin
+        if(reset_p) begin
+            timer_start <= 0;
+            gate_open   <= 0;
+            state_led   <= 2'b00;
+        end
+        else begin
+            // 기본값 설정
+            timer_start <= 0;
+            gate_open   <= 0;
+            state_led   <= 2'b00;
+
+            // 반응성을 위해 next_state를 기준으로 출력 결정
+            case(next_state) 
+                IDLE: begin
+                    state_led <= 2'b00;
+                end
+                
+                SILENT: begin
+                    timer_start <= 1; 
+                    state_led   <= 2'b01;
+                end
+                
+                VERIFY: begin
+                    state_led <= 2'b10;
+                end
+                
+                OPEN: begin
+                    state_led <= 2'b11;
+                    gate_open <= 1;
+                end
+                
+                // [추가됨] FAULT 상태일 때 LED 점멸 등의 표시 가능
+                FAULT: begin
+                     state_led <= 2'b00; // 예: OPEN과 같은 LED 혹은 다른 패턴
+                     gate_open <= 0;     // 게이트 강제 폐쇄 (안전)
+                end
+            endcase
+        end
+    end
+
+endmodule
+
+module password_check(
+    input clk,
+    input reset_p,
+    input enable,          // FSM의 gate_open 신호와 연결 (문이 열려야 작동)
+    input data_in,         // 보내려는 데이터 (스위치 등)
+    output [2:0] debug_led // 상태 확인용 LED
+);
+
+    reg [3:0] r_lfsr;
+    wire feedback;
+    reg [26:0] clk_counter;
+    reg clk_enable;
+
+    // 1. 난수 생성기 (LFSR)
+    assign feedback = r_lfsr[3] ^ r_lfsr[2]; 
+
+    // 2. 시간 지연 (눈으로 깜빡임 확인용, 약 0.6초)
+    always @(posedge clk or posedge reset_p) begin
+        if (reset_p) begin
+            clk_counter <= 0;
+            clk_enable <= 0;
+        end else begin
+            if (clk_counter == 67000000) begin
+                clk_counter <= 0;
+                clk_enable <= 1;
+            end else begin
+                clk_counter <= clk_counter + 1;
+                clk_enable <= 0;
+            end
+        end
+    end
+
+    // 3. LFSR 난수값 갱신
+    always @(posedge clk or posedge reset_p) begin
+        if (reset_p) begin
+            r_lfsr <= 4'b0001; // 초기 시드값
+        end else begin
+            if (clk_enable == 1) begin
+                r_lfsr <= {r_lfsr[2:0], feedback}; 
+            end
+        end
+    end
+
+    // =========================================================
+    // 암호화 로직 (XOR Cipher)
+    // =========================================================
+    
+    // 키(Key): LFSR에서 나온 난수 (r_lfsr[0])
+    wire key_bit = r_lfsr[0];
+
+    // 암호화: 데이터 ^ 키
+    wire encrypted_data = data_in ^ key_bit;
+
+    // 복호화: 암호문 ^ 키 (원래 데이터가 나와야 함)
+    wire decrypted_data = encrypted_data ^ key_bit;
+
+    // =========================================================
+    // 출력 제어 (물리적 차단 구현)
+    // =========================================================
+    
+    // enable(gate_open)이 1일 때만 LED에 신호를 보냄
+    // 문이 닫혀있으면(0) LED는 꺼짐(0)
+    assign debug_led[0] = (enable) ? data_in : 1'b0;        // 원본
+    assign debug_led[1] = (enable) ? encrypted_data : 1'b0; // 암호문 (막 깜빡임)
+    assign debug_led[2] = (enable) ? decrypted_data : 1'b0; // 복호문 (원본과 같음)
+
 endmodule
