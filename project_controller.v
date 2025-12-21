@@ -182,7 +182,7 @@ module bar_led(
     input clk,
     input reset_p,
     input [2:0] button, // push 버튼
-    output reg [5:0] led_bar_out 
+    output reg [7:0] led_bar_out 
 );
     
     reg reight_left;
@@ -190,19 +190,21 @@ module bar_led(
         if(reset_p)begin
             reight_left = 0; 
         end
-        if(button[0])begin
-            reight_left = ~reight_left;
+        else begin 
+            if(button[0])begin
+                reight_left = ~reight_left;
+            end
         end
     end
     
-    reg [5:0] shift;
+    reg [7:0] shift;
     reg on_off_mode;
     reg [26:0] clk_counter;
     reg [26:0] clk_shift_counter;
      
     always @(posedge clk, posedge reset_p) begin
         if (reset_p) begin
-             shift = 5'b000001;
+             shift = 8'b0000_0001;
              clk_counter = 0;
              led_bar_out = 0;
         end
@@ -210,7 +212,7 @@ module bar_led(
             if(reight_left)begin
                 if(clk_shift_counter == 10000000)begin
                     clk_shift_counter = 0;
-                    shift = {shift[0], shift[5:1]};
+                    shift = {shift[0], shift[7:1]};
                 end
                 else begin
                     clk_shift_counter = clk_shift_counter + 1;
@@ -219,7 +221,7 @@ module bar_led(
             else begin
                  if(clk_shift_counter == 10000000)begin
                     clk_shift_counter = 0;
-                    shift = {shift[4:0], shift[5]};
+                    shift = {shift[6:0], shift[7]};
                 end
                 else begin
                     clk_shift_counter = clk_shift_counter + 1;
@@ -228,23 +230,21 @@ module bar_led(
             if(on_off_mode)begin
                 if (clk_counter < 100000000) begin
                     clk_counter = clk_counter + 1;
-                    led_bar_out[5:0] = 0;
+                    led_bar_out[7:0] = 0;
                 end 
                 else if(clk_counter < 200000000)  begin
                     clk_counter = clk_counter + 1;
-                    led_bar_out[5:0] = shift;
+                    led_bar_out[7:0] = shift;
                 end
                 else if(clk_counter >= 200000000) begin
                     clk_counter =0;
                 end
             end
             else begin
-                led_bar_out[5:0] = shift;
+                led_bar_out[7:0] = shift;
             end
         end
     end
- 
-    reg [26:0] clk_counter;
 
     always @(posedge clk or posedge reset_p) begin
         if (reset_p) begin

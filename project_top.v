@@ -158,7 +158,7 @@ module Physica_Layer_Security_test_top(
         else begin
             if(humidity >= 8'd10 && temperature >= 8'd10) dht11_ok = 1;
             else dht11_ok = 0;
-            if(distance_cm < 9'd150 && distance_cm >= 9'd100) sonic_ok = 1;
+            if(distance_cm < 9'd200 && distance_cm >= 9'd100) sonic_ok = 1;
             else sonic_ok = 0;
         end
     end    
@@ -191,5 +191,29 @@ module Physica_Layer_Security_test_top(
     assign led[13] = crypto_leds[0]; // 원본 데이터 (스위치 3번 따라감)
     assign led[14] = crypto_leds[1]; // 암호화된 데이터 (난수랑 섞여서 깜빡거림)
     assign led[15] = crypto_leds[2]; // 복호화된 데이터 (원본과 같아야 함)
+
+endmodule
+
+module led_mode(
+    input clk, reset_p,
+    input [2:0] button,
+    input slide,
+    output led_r, led_g, led_b,
+    output [7:0] led_bar_out
+    );
+
+    wire [2:0] btn_pedge;
+    button_ctr btn0(clk, reset_p, button[0], btn_pedge[0]);
+    button_ctr btn1(clk, reset_p, button[1], btn_pedge[1]);
+    button_ctr btn2(clk, reset_p, button[2], btn_pedge[2]);
+
+    wire [2:0] btn_to_three; // 3색 LED 모듈로 갈 버튼 신호
+    wire [2:0] btn_to_bar; // Bar LED 모듈로 갈 버튼 신호
+
+    assign btn_to_three = (slide == 1'b0) ? btn_pedge : 3'b000;
+    assign btn_to_bar   = (slide == 1'b1) ? btn_pedge : 3'b000;
+
+    three_led_top thrl(clk, reset_p, btn_to_three, led_r, led_g, led_b);
+    bar_led barl(clk, reset_p, btn_to_bar, led_bar_out);
 
 endmodule
