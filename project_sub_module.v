@@ -202,3 +202,50 @@ module clock_usec(
  
 endmodule
 
+module seg_decoder(
+    input [3:0] hex_value,
+    output reg [7:0] seg);
+
+    always @(hex_value) begin
+        case(hex_value)
+            //             pgfe_dcba
+            4'd0: seg = 8'b1100_0000;
+            4'd1: seg = 8'b1111_1001;
+            4'd2: seg = 8'b1010_0100;
+            4'd3: seg = 8'b1011_0000;
+            4'd4: seg = 8'b1001_1001;
+            4'd5: seg = 8'b1001_0010;
+            4'd6: seg = 8'b1000_0010;
+            4'd7: seg = 8'b1111_1000;
+            4'd8: seg = 8'b1000_0000;
+            4'd9: seg = 8'b1001_1000;
+            
+            4'd10: seg = 8'b1000_1000; // A
+            4'd11: seg = 8'b1000_0011; // B
+            4'd12: seg = 8'b1100_0110; // C
+            4'd13: seg = 8'b1010_0001; // D
+            4'd14: seg = 8'b1000_0110; // E
+            4'd15: seg = 8'b1000_1110; // F
+            
+        endcase
+    end   
+endmodule
+
+module bin_to_dec(
+    input [11:0] bin,
+    output reg[15:0] bcd);
+
+    integer i;
+    
+    always @(bin) begin
+        bcd = 0;
+        for(i = 0; i < 12; i = i+1) begin
+            if(bcd[3:0] >= 5) bcd[3:0] = bcd[3:0] + 3; 
+            if(bcd[7:4] >= 5) bcd[7:4] = bcd[7:4] + 3;
+            if(bcd[11:8] >= 5) bcd[11:8] = bcd[11:8] + 3;
+            if(bcd[15:12] >= 5) bcd[15:12] = bcd[15:12] + 3;
+            bcd = {bcd[14:0], bin[11-i]};
+        end
+    end
+
+endmodule

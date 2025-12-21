@@ -102,12 +102,14 @@ endmodule
 module Physica_Layer_Security_test_top(
     input clk, 
     input reset_p,
-    input button,         // 발사 버튼 (BTN)
-    input [3:0] s_button, // 각종 센서 및 암호 입력용 스위치
+    input button,          // 발사 버튼 (BTN)
+    input s_button,        // 비밀번호 slide sw[15]
     output [15:0] led,     // 상태 표시 LED
     input echo,
     output trig,
-    inout dht11_data
+    inout dht11_data,
+    output [7:0] seg,
+    output [3:0] com
     );
     
     // --- 기존 모듈 연결 ---
@@ -127,23 +129,39 @@ module Physica_Layer_Security_test_top(
     wire timer_start, gate_open;
     wire [1:0] state_led;
     
+    wire [7:0] humidity, temperature;
+    wire [8:0] distance_cm;
+    reg dht11_ok;
+    reg sonic_ok;
+    
     FSM_Controller fsm(
         .clk(clk),
         .reset_p(reset_p),
         .sw_launch(btn_pedge),            // 발사!
         .timer_done(clk_sec_nedge),       // 5초 경과
-        .sonic_sensor_ok(s_button[0]),    // 스위치 0번: 고도 센서 역할
-        .dht_sensor_ok(s_button[1]),      // 스위치 1번: 온, 습도 센서 역할
+        .sonic_sensor_ok(sonic_ok),    // 스위치 0번: 고도 센서 역할
+        .dht_sensor_ok(dht11_ok),      // 스위치 1번: 온, 습도 센서 역할
         .timer_start(timer_start),
         .gate_open(gate_open),            // ★ 핵심 신호: 문 열어!
         .state_led(state_led)
     );
 
-    wire [8:0]distance_cm;
     hc_sr04 ultra(.clk(clk), .reset_p(reset_p), .echo(echo), .trig(trig), .distance_cm(distance_cm));
 
-    wire [7:0] humidity, temperature;
     dht11_cntr DUT(.clk(clk), .reset_p(reset_p), .dht11_data(dht11_data), .humidity(humidity), .temperature(temperature));
+    
+    always @(posedge clk, posedge reset_p)begin
+        if(reset_p)begin
+            dht11_ok = 0;
+            sonic_ok = 0;
+        end
+        else begin
+            if(humidity >= 8'd10 && temperature >= 8'd10) dht11_ok = 1;
+            else dht11_ok = 0;
+            if(distance_cm < 9'd150 && distance_cm >= 9'd100) sonic_ok = 1;
+            else sonic_ok = 0;
+        end
+    end    
     
     // --- [추가] 암호화 모듈 연결 ---
     // s_button[3]을 '보내려는 비밀 암호'라고 가정합니다.
@@ -153,9 +171,14 @@ module Physica_Layer_Security_test_top(
         .clk(clk),
         .reset_p(reset_p),
         .enable(gate_open),     // ★ FSM이 문을 열어줘야만 작동함!
-        .data_in(s_button[3]),  // 스위치 3번을 데이터로 사용
+        .data_in(s_button),     // 스위치 15번을 데이터로 사용
         .debug_led(crypto_leds) // 암호화 결과 LED로 출력
     );
+
+    wire [15:0] distance_bcd;
+    bin_to_dec btd_x(.bin(distance_cm), .bcd(distance_bcd));
+        
+    FND_cntr fnd(.clk(clk), .reset_p(reset_p), .fnd_value(distance_bcd), .seg(seg), .com(com));
 
     // --- LED 연결 ---
     // [0~7] FSM 상태 표시
