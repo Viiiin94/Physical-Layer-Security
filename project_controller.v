@@ -24,7 +24,7 @@
 // button[1]: 기본모드 or 느리게 깜빡임 
 // button[2]: 기본모드 or 빠르게 깜빡임 
 // ==========================================
-module three_led_top(
+module three_led(
     input clk, reset_p,
     input [2:0] button,
     output led_r, led_g, led_b
@@ -37,11 +37,6 @@ module three_led_top(
     
     reg [2:0] current_mode;
     reg [1:0] color_sel;
-
-    wire [2:0] btn_pedge;
-    button_ctr btn_cycle(clk, reset_p, button[0], btn_pedge[0]);
-    button_ctr btn_dimming(clk, reset_p, button[1], btn_pedge[1]);
-    button_ctr btn_blink(clk, reset_p, button[2], btn_pedge[2]);
     
     always @(posedge clk or posedge reset_p) begin
         if(reset_p) begin
@@ -50,12 +45,12 @@ module three_led_top(
         end
         else begin
             // [버튼 0] 색상 변경 (R->G->B->R...)
-            if (btn_pedge[0]) begin
+            if (button[0]) begin
                 if(color_sel >= 2) color_sel <= 0;
                 else color_sel <= color_sel + 1;
             end
             // [버튼 1] 서서히 켜졌다 꺼짐
-            else if (btn_pedge[1]) begin 
+            else if (button[1]) begin 
                 if (current_mode == MODE_DIMMING) begin
                     current_mode <= MODE_COLOR_CYCLE; // 이미 켜져있으면 -> 끔 (기본모드 복귀)
                 end
@@ -64,7 +59,7 @@ module three_led_top(
                 end
             end
             // [버튼 2] 빠르게 깜빡
-            else if (btn_pedge[2]) begin 
+            else if (button[2]) begin 
                 // 이미 깜빡임 모드라면? -> 기본 모드(그냥 켜짐)로 복귀
                 if (current_mode == MODE_FAST_BLINK) begin
                     current_mode <= MODE_COLOR_CYCLE;
@@ -210,7 +205,7 @@ module bar_led(
         end
         else begin
             if(reight_left)begin
-                if(clk_shift_counter == 10000000)begin
+                if(clk_shift_counter == 10_000_000)begin
                     clk_shift_counter = 0;
                     shift = {shift[0], shift[7:1]};
                 end
@@ -384,11 +379,13 @@ endmodule
 module password_check(
     input clk,
     input reset_p,
-    input enable,          // FSM의 gate_open 신호와 연결 (문이 열려야 작동)
-    input data_in,         // 보내려는 데이터 (스위치 등)
-    output [2:0] debug_led // 상태 확인용 LED
+    input enable,               // FSM의 gate_open 신호와 연결 (문이 열려야 작동)
+    input [3:0]pw_in,         // 넣을 비밀번호
+    output [11:0] debug_led      // 상태 확인용 LED
 );
 
+    localparam [3:0]real_pw = 4'b0101;
+    
     reg [3:0] r_lfsr;
     wire feedback;
     reg [26:0] clk_counter;
@@ -424,18 +421,21 @@ module password_check(
         end
     end
 
+    wire [3:0]data_in;
+    assign data_in = (real_pw == pw_in) ? pw_in : 4'b1111;
+    
     // =========================================================
     // 암호화 로직 (XOR Cipher)
     // =========================================================
     
     // 키(Key): LFSR에서 나온 난수 (r_lfsr[0])
-    wire key_bit = r_lfsr[0];
+    wire [3:0]key_bit = r_lfsr;
 
     // 암호화: 데이터 ^ 키
-    wire encrypted_data = data_in ^ key_bit;
+    wire [3:0]encrypted_data = data_in ^ key_bit;
 
     // 복호화: 암호문 ^ 키 (원래 데이터가 나와야 함)
-    wire decrypted_data = encrypted_data ^ key_bit;
+    wire [3:0]decrypted_data = encrypted_data ^ key_bit;
 
     // =========================================================
     // 출력 제어 (물리적 차단 구현)
@@ -443,9 +443,9 @@ module password_check(
     
     // enable(gate_open)이 1일 때만 LED에 신호를 보냄
     // 문이 닫혀있으면(0) LED는 꺼짐(0)
-    assign debug_led[0] = (enable) ? data_in : 1'b0;        // 원본
-    assign debug_led[1] = (enable) ? encrypted_data : 1'b0; // 암호문 (막 깜빡임)
-    assign debug_led[2] = (enable) ? decrypted_data : 1'b0; // 복호문 (원본과 같음)
+    
+    // 순서: [11:8] 복호화, [7:4] 암호화, [3:0] 원본
+    assign debug_led = (enable) ? {decrypted_data, encrypted_data, data_in} : 12'b0;
 
 endmodule
 
@@ -781,3 +781,147 @@ module FND_cntr(
     seg_decoder dec(.hex_value(digit_value),.seg(seg));
     
 endmodule 
+
+module bar_led_595(
+    input clk,
+    input reset_p,
+    input [2:0] button, // push 버튼
+    
+    // 74HC595 제어용 3선 인터페이스
+    output reg hc_data,  // DS (Serial Data)
+    output reg hc_sclk,  // SH_CP (Shift Clock)
+    output reg hc_rclk   // ST_CP (Latch Clock)
+);
+    
+    // --- [1] 기존 로직: LED 패턴 계산 ---
+    reg right_left; // 오타 수정: reight_left -> right_left
+    always @(posedge clk, posedge reset_p) begin
+        if(reset_p) right_left <= 0; 
+        else if(button[0]) right_left <= ~right_left;
+    end
+    
+    reg on_off_mode;
+    always @(posedge clk or posedge reset_p) begin
+        if (reset_p) begin
+            on_off_mode = 0;
+        end 
+        else if(button[1]) begin
+            on_off_mode = 1;
+        end
+        else if(button[2])begin
+            on_off_mode = 0;
+        end
+    end 
+    
+    reg [7:0] shift;
+    reg [26:0] clk_counter;
+    reg [26:0] clk_shift_counter;
+    
+    // 74HC595로 보낼 최종 8비트 데이터 저장소
+    reg [7:0] led_pattern_buffer; 
+
+    // LED 패턴 생성 로직 (Blocking = -> Non-blocking <= 으로 수정 권장)
+    always @(posedge clk, posedge reset_p) begin
+        if (reset_p) begin
+             shift <= 8'b0000_0001;
+             clk_counter <= 0;
+             clk_shift_counter <= 0;
+             led_pattern_buffer <= 0;
+        end
+        else begin
+            // 1. Shift 동작 로직
+            if(right_left) begin
+                if(clk_shift_counter >= 10_000_000) begin // 0.1초
+                    clk_shift_counter <= 0;
+                    shift <= {shift[0], shift[7:1]}; // ROR
+                end
+                else begin
+                    clk_shift_counter <= clk_shift_counter + 1;
+                end
+            end
+            else begin
+                 if(clk_shift_counter >= 10_000_000) begin
+                    clk_shift_counter <= 0;
+                    shift <= {shift[6:0], shift[7]}; // ROL
+                end
+                else begin
+                    clk_shift_counter <= clk_shift_counter + 1;
+                end            
+            end
+            if(on_off_mode)begin
+                // 2. 깜빡임(On/Off) 모드 로직 및 최종 출력 결정
+                // (button[1] 등을 on_off_mode 트리거로 사용한다고 가정)
+                if (clk_counter < 100000000) begin
+                    clk_counter <= clk_counter + 1;
+                    // on_off_mode가 켜져있다면 꺼짐, 아니면 켜짐 등 로직에 따라 할당
+                    // 여기서는 예제 로직 그대로 led_pattern_buffer에 값 할당
+                    // (기존 코드의 led_bar_out = 0 부분)
+                    led_pattern_buffer <= 0;
+                end 
+                else if(clk_counter < 200000000) begin
+                    clk_counter <= clk_counter + 1;
+                    led_pattern_buffer <= shift;
+                end
+                else begin
+                    clk_counter <= 0;
+                end
+            end
+            else begin
+                led_pattern_buffer <= shift;
+            end
+        end
+    end
+
+    // --- [2] 추가된 로직: 74HC595 직렬 통신 드라이버 ---
+    
+    reg [5:0] send_cnt;      // 통신 상태 카운터 (0~31)
+    reg [15:0] div_cnt;      // 통신 속도 조절용 분주기
+    wire send_tick;
+    
+    // 통신 속도: 너무 빠르면 595가 못 받을 수 있으니 약간 늦춤 (예: 1MHz)
+    assign send_tick = (div_cnt == 0); 
+    
+    always @(posedge clk, posedge reset_p) begin
+        if(reset_p) div_cnt <= 0;
+        else if(div_cnt >= 100) div_cnt <= 0; // 100분주
+        else div_cnt <= div_cnt + 1;
+    end
+
+    // 데이터를 보내는 State Machine
+    always @(posedge clk, posedge reset_p) begin
+        if(reset_p) begin
+            hc_data <= 0;
+            hc_sclk <= 0;
+            hc_rclk <= 0;
+            send_cnt <= 0;
+        end
+        else if(send_tick) begin
+            // 0~15: 데이터 8비트 전송 (2 tick당 1비트)
+            if(send_cnt < 16) begin
+                hc_rclk <= 0; // 전송 중에는 래치 Low
+                
+                if(send_cnt[0] == 0) begin // 짝수: 데이터 세팅, 클럭 Low
+                    hc_sclk <= 0;
+                    // MSB부터 보냅니다 (7번 비트 - send_cnt/2)
+                    hc_data <= led_pattern_buffer[7 - (send_cnt >> 1)];
+                end
+                else begin // 홀수: 클럭 High (Rising Edge에서 데이터 Shift)
+                    hc_sclk <= 1;
+                end
+                send_cnt <= send_cnt + 1;
+            end
+            // 16: 전송 완료 후 Latch Pulse (Rising Edge에서 출력 갱신)
+            else if(send_cnt == 16) begin
+                hc_sclk <= 0;
+                hc_rclk <= 1; // 래치 클럭 High (출력!)
+                send_cnt <= send_cnt + 1;
+            end
+            // 17: 래치 클럭 복귀 및 대기
+            else begin
+                hc_rclk <= 0;
+                send_cnt <= 0; // 다시 처음부터 반복 (무한 리프레시)
+            end
+        end
+    end
+
+endmodule
