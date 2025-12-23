@@ -380,8 +380,8 @@ module password_check(
     input clk,
     input reset_p,
     input enable,               // FSM의 gate_open 신호와 연결 (문이 열려야 작동)
-    input [3:0]pw_in,         // 넣을 비밀번호
-    output [11:0] debug_led      // 상태 확인용 LED
+    input [3:0]pw_in,           // 넣을 비밀번호
+    output [5:0] debug_led      // 상태 확인용 LED
 );
 
     localparam [3:0]real_pw = 4'b0101;
@@ -422,7 +422,7 @@ module password_check(
     end
 
     wire [3:0]data_in;
-    assign data_in = (real_pw == pw_in) ? pw_in : 4'b1111;
+    assign data_in = (enable && (real_pw == pw_in)) ? pw_in : 4'b00;
     
     // =========================================================
     // 암호화 로직 (XOR Cipher)
@@ -440,13 +440,11 @@ module password_check(
     // =========================================================
     // 출력 제어 (물리적 차단 구현)
     // =========================================================
-    
-    // enable(gate_open)이 1일 때만 LED에 신호를 보냄
-    // 문이 닫혀있으면(0) LED는 꺼짐(0)
-    
-    // 순서: [11:8] 복호화, [7:4] 암호화, [3:0] 원본
-    assign debug_led = (enable) ? {decrypted_data, encrypted_data, data_in} : 12'b0;
 
+    assign debug_led[0]   = (enable && (real_pw == pw_in)) ? 1'b1           : 1'b0;
+    assign debug_led[4:1] = (enable)                       ? encrypted_data : 4'b0;
+    assign debug_led[5]   = (decrypted_data == real_pw)    ? 1'b1           : 1'b0;
+    
 endmodule
 
 module hc_sr04(
@@ -552,6 +550,7 @@ module hc_sr04(
         end
     end 
 endmodule
+
 
 module dht11_cntr(
     input clk, reset_p,            // clk: 시스템 클럭, reset_p: 리셋 신호 (Active High)
@@ -924,4 +923,344 @@ module bar_led_595(
         end
     end
 
+endmodule
+
+module i2c_txtlcd(
+    input clk, reset_p,
+    input lcd_pedge,
+    output scl, sda
+);
+    
+    // LCD 초기 구동 전 대기 시간을 만들기 위한 카운터 (약 80ms)
+    integer cnt_sysclk;
+    reg count_clk_e;
+    always @(negedge clk, posedge reset_p) begin
+        if(reset_p) cnt_sysclk = 0;
+        else if(count_clk_e) cnt_sysclk = cnt_sysclk + 1;
+        else cnt_sysclk = 0;
+    end
+    
+    // 0.5초(50,000,000 클럭)마다 쉬프트 신호를 발생시키는 타이머
+    integer shift_cnt_sysclk;
+    reg shift_clk_e;
+    reg show_flag;             // LCD 출력 여부를 결정하는 토글 플래그
+    always @(posedge clk, posedge reset_p) begin
+        if(reset_p) begin
+            shift_cnt_sysclk = 0;
+            shift_clk_e = 0;
+        end
+        else if (show_flag) begin // 화면이 켜져 있을 때만 타이머 작동
+            if(shift_cnt_sysclk >= 50_000_000) begin
+                shift_cnt_sysclk = 0;
+                shift_clk_e = 1;  // 0.5초 달성 시 1회 펄스 발생
+            end
+            else begin
+                shift_cnt_sysclk = shift_cnt_sysclk + 1;
+                shift_clk_e = 0;
+            end      
+        end
+        else begin
+            shift_cnt_sysclk = 0;
+            shift_clk_e = 0;
+        end
+    end
+    
+    // I2C LCD 하위 모듈 (실제 바이트 전송 담당)
+    reg [7:0] send_buffer;
+    reg send, rs;
+    wire busy;
+    i2c_lcd_send_byte send_byte(clk, reset_p, 7'h27, send_buffer, send, rs, scl, sda, busy, led);
+                                
+    // FSM 상태 정의 (One-hot Encoding 방식)
+    localparam IDLE           = 4'b0001; // 대기 및 버튼/타이머 감시
+    localparam INIT           = 4'b0010; // LCD 초기 설정 명령어 전송
+    localparam SEND_CHARACTER = 4'b0100; // 데이터(문자열) 전송
+    localparam CLEAR_DISPLAY  = 4'b1000; // 화면 전체 삭제
+
+    reg [3:0] state, next_state;
+    // 상태 레지스터 업데이트 (클럭 하강 엣지)
+    always @(negedge clk, posedge reset_p) begin
+        if(reset_p) state = IDLE;
+        else state = next_state;
+    end
+    
+    reg init_flag;            // 초기화 완료 여부 확인
+    reg [5:0] cnt_data;       // 전송할 글자/명령어의 인덱스 카운터
+    reg [3:0] start_index;    // 1행 문자열의 시작 위치 (쉬프트 효과)
+
+    // 상태 전이 및 출력 로직 (클럭 상승 엣지)
+    always @(posedge clk, posedge reset_p) begin
+        if(reset_p) begin
+            next_state = IDLE; init_flag = 0; cnt_data = 0; count_clk_e = 0;
+            send = 0; send_buffer = 0; rs = 0; show_flag = 0; start_index = 0;
+        end
+        else begin
+            case(state)
+                IDLE : begin
+                    if(init_flag) begin
+                        if(lcd_pedge) begin // 버튼을 누르면 화면 토글
+                            show_flag = ~show_flag;
+                            start_index = 0;
+                            if(show_flag) next_state = SEND_CHARACTER;
+                            else next_state = CLEAR_DISPLAY;
+                        end
+                        // 0.5초마다 인덱스를 바꿔서 글자를 왼쪽으로 이동시킴
+                        else if(show_flag && shift_clk_e) begin
+                            start_index = (start_index == 15) ? 0 : start_index + 1;
+                            next_state = SEND_CHARACTER; // 다시 전송 상태로 가서 화면 갱신
+                        end
+                    end
+                    else begin // 초기 기동 시 80ms 대기 후 INIT 상태로 이동
+                        if(cnt_sysclk <= 8_000_000) count_clk_e = 1;
+                        else begin
+                            count_clk_e = 0;
+                            next_state = INIT;
+                        end
+                    end
+                end    
+
+                INIT : begin // LCD의 기본 동작 모드(4비트, 커서, 전원 등) 설정
+                    if(busy) begin
+                        send = 0;
+                        if(cnt_data >= 6) begin // 6개의 초기화 명령 전송 완료 시
+                            cnt_data = 0; next_state = IDLE; init_flag = 1;
+                        end
+                    end
+                    else if(!send) begin
+                        case(cnt_data)
+                            0: send_buffer = 8'h33; // 8비트 모드 설정
+                            1: send_buffer = 8'h32; // 4비트 모드 설정
+                            2: send_buffer = 8'h28; // 2라인 표시, 5x8 폰트
+                            3: send_buffer = 8'h0c; // Display ON, 커서 OFF (깜빡임 방지)
+                            4: send_buffer = 8'h01; // 화면 내용 전체 삭제
+                            5: send_buffer = 8'h06; // 쓰기 후 주소 자동 증가
+                        endcase
+                        send = 1; cnt_data = cnt_data + 1;
+                    end
+                end
+
+                SEND_CHARACTER : begin
+                    if(busy) begin
+                        send = 0;
+                        if(cnt_data >= 34) begin // 모든 단계(34단계) 완료 시 IDLE로
+                            cnt_data = 0; next_state = IDLE;
+                        end
+                    end
+                    else if(!send) begin
+                        // 1단계: 화면 갱신 시 잔상을 없애기 위해 디스플레이를 잠시 끔
+                        if(cnt_data == 0) begin
+                            rs = 0; send_buffer = 8'h08; // Display OFF 명령
+                        end
+                        // 2단계: 1번째 줄 첫 번째 칸으로 커서 이동
+                        else if(cnt_data == 1) begin
+                            rs = 0; send_buffer = 8'h80; 
+                        end
+                        // 3~18단계: 1행 데이터 전송 (start_index를 더해 쉬프트 구현)
+                        else if(cnt_data >= 2 && cnt_data <= 17) begin
+                            rs = 1; // 문자 데이터 전송 모드
+                            case((cnt_data - 2 + start_index) % 16)
+                                0: send_buffer = "M"; 1: send_buffer = "E"; 2: send_buffer = "R";
+                                3: send_buffer = "R"; 4: send_buffer = "Y"; 5: send_buffer = " ";
+                                6: send_buffer = "C"; 7: send_buffer = "H"; 8: send_buffer = "R";
+                                9: send_buffer = "I"; 10: send_buffer = "S"; 11: send_buffer = "T";
+                                12: send_buffer = "M"; 13: send_buffer = "A"; 14: send_buffer = "S";
+                                default: send_buffer = " "; // 15번 인덱스 등은 공백 처리
+                            endcase
+                        end
+                        // 19단계: 2번째 줄 첫 번째 칸으로 커서 이동
+                        else if(cnt_data == 18) begin
+                            rs = 0; send_buffer = 8'hC0; 
+                        end
+                        // 20~33단계: 2행 데이터 전송 (고정 문구)
+                        else if(cnt_data >= 19 && cnt_data <= 32) begin
+                            rs = 1;
+                            case(cnt_data - 19)
+                                0: send_buffer = "H"; 1: send_buffer = "A"; 2: send_buffer = "P";
+                                3: send_buffer = "P"; 4: send_buffer = "Y"; 5: send_buffer = " ";
+                                6: send_buffer = "N"; 7: send_buffer = "E"; 8: send_buffer = "W";
+                                9: send_buffer = " "; 10: send_buffer = "Y"; 11: send_buffer = "E";
+                                12: send_buffer = "A"; 13: send_buffer = "R";
+                                default: send_buffer = " ";
+                            endcase
+                        end
+                        // 마지막 단계: 모든 데이터를 썼으므로 화면을 다시 켬 (잔상 제거 완료)
+                        else if(cnt_data == 33) begin
+                            rs = 0; send_buffer = 8'h0c; // Display ON 명령
+                        end
+                        send = 1; cnt_data = cnt_data + 1;
+                    end    
+                end
+
+                CLEAR_DISPLAY : begin // 화면 내용을 지우는 독립 상태
+                    if(busy) begin
+                        send = 0; next_state = IDLE;
+                    end
+                    else if(!send) begin
+                        rs = 0; send_buffer = 8'h01; // LCD Clear 명령
+                        send = 1;
+                    end
+                end
+            endcase
+        end
+    end
+endmodule
+
+module I2C_master(
+    input clk, reset_p,
+    input [6:0] addr, // 주소
+    input [7:0] data, // 데이터
+    input rd_wr, comm_start, // 
+    output reg scl, sda,
+    output reg busy,
+    output [15:0] led
+);
+
+    localparam IDLE         = 7'b000_0001;
+    localparam COMM_START   = 7'b000_0010;
+    localparam SEND_ADDR    = 7'b000_0100;
+    localparam RD_ACK       = 7'b000_1000;
+    localparam SEND_DATA    = 7'b001_0000;
+    localparam SCL_STOP     = 7'b010_0000;
+    localparam COMM_STOP    = 7'b100_0000;
+    
+    wire clk_usec_nedge;
+    // us counter
+    clock_usec usec_clk(.clk(clk), .reset_p(reset_p),
+                        .clk_usec_nedge(clk_usec_nedge));
+                        
+    wire comm_start_pedge;
+    // start bit
+    edge_detector_p ed_start(.clk(clk), .reset_p(reset_p),
+                             .cp(comm_start), .p_edge(comm_start_pedge));
+                       
+    wire scl_nedge, scl_pedge;
+    // clock edge n p
+    edge_detector_p ed_scl(.clk(clk), .reset_p(reset_p),
+                           .cp(scl), .p_edge(scl_pedge), .n_edge(scl_nedge));
+    
+    reg [2:0] count_usec5;
+    reg scl_e;
+    always @(posedge clk, posedge reset_p) begin
+        if(reset_p) begin
+            count_usec5 = 0;
+            scl = 1; // idle 상태일 때 1
+        end
+        else if(scl_e)begin
+            if(clk_usec_nedge) begin
+                // 100KHz => 10us라서 10us 구현
+                if(count_usec5 >= 4) begin
+                    count_usec5 = 0;
+                    scl = ~scl;
+                end
+                else begin
+                    count_usec5 = count_usec5 + 1;
+                end
+            end
+        end
+        else if(!scl_e) begin
+            count_usec5 = 0;
+            scl = 1;
+        end
+    end
+
+    reg [6:0] state, next_state;
+    always @(negedge clk, posedge reset_p) begin
+        if(reset_p) state = IDLE;
+        else state = next_state;
+    end
+
+    wire [7:0] addr_rw; //  address read write
+    assign addr_rw = {addr, rd_wr};
+    reg [2:0] cnt_bit;
+    reg stop_flag;
+    always @(posedge clk, posedge reset_p) begin
+        if(reset_p) begin
+            next_state = IDLE;
+            scl_e = 0;
+            sda = 0;
+            cnt_bit = 7;
+            stop_flag = 0;
+            busy = 0;
+        end
+        else begin
+            case (state)
+                IDLE      : begin
+                    busy = 0;
+                    scl_e = 0;
+                    sda = 1;
+                    if(comm_start_pedge) begin
+                        next_state = COMM_START;
+                    end
+                end
+                COMM_START: begin
+                    busy = 1;
+                    sda = 0;
+                    next_state = SEND_ADDR;
+                end
+                SEND_ADDR : begin
+                    scl_e = 1;
+                    if(scl_nedge) begin
+                        sda = addr_rw[cnt_bit];
+                    end
+                    if(scl_pedge) begin
+                        if(cnt_bit == 0) begin
+                            cnt_bit = 7;
+                            next_state = RD_ACK;
+                        end
+                        else begin
+                            cnt_bit = cnt_bit - 1;
+                        end
+                    end
+                end 
+                RD_ACK    : begin 
+                    if(scl_nedge) begin
+                        sda = 'bz;
+                    end
+                    if(scl_pedge) begin
+                        if(stop_flag) begin
+                            stop_flag = 0;
+                            next_state = SCL_STOP;
+                        end
+                        else begin
+                            stop_flag = 1;
+                            next_state = SEND_DATA;
+                        end
+                    end
+                end    
+                SEND_DATA : begin
+                    if(scl_nedge) begin
+                        sda = data[cnt_bit];
+                    end
+                    if(scl_pedge) begin
+                        if(cnt_bit == 0) begin
+                            cnt_bit = 7;
+                            next_state = RD_ACK;
+                        end
+                        else begin
+                            cnt_bit = cnt_bit - 1;
+                        end
+                    end
+                end 
+                SCL_STOP  : begin
+                    if(scl_nedge) begin
+                        sda = 0;
+                    end
+                    if(scl_pedge) begin
+                        next_state = COMM_STOP;
+                    end
+                end  
+                COMM_STOP : begin
+                    if(count_usec5 >= 3) begin
+                        scl_e = 0; // 대략 40us 뒤
+                        sda = 1;
+                        next_state = IDLE;
+                    end
+                end
+                default   : begin
+                    next_state = IDLE;
+                end
+            endcase
+        end
+    end
+//    assign led[6:0] = state;
 endmodule

@@ -109,7 +109,8 @@ module Physica_Layer_Security_test_top(
     output trig,
     inout dht11_data,
     output [7:0] seg,
-    output [3:0] com
+    output [3:0] com,
+    output scl, sda
     );
     
     // --- 기존 모듈 연결 ---
@@ -158,14 +159,14 @@ module Physica_Layer_Security_test_top(
         else begin
             if(humidity >= 8'd10 && temperature >= 8'd10) dht11_ok = 1;
             else dht11_ok = 0;
-            if(distance_cm < 9'd300) sonic_ok = 1;
+            if(distance_cm >= 9'd30 && distance_cm < 9'd200) sonic_ok = 1;
             else sonic_ok = 0;
         end
     end    
     
     // --- [추가] 암호화 모듈 연결 ---
     // s_button[3:0]을 '보내려는 비밀 암호'라고 가정합니다.
-    wire [11:0] crypto_leds;
+    wire [5:0] crypto_leds;
 
     password_check my_crypto (
         .clk(clk),
@@ -188,8 +189,14 @@ module Physica_Layer_Security_test_top(
     assign led[3] = state_led[1];
 
     // [13~15] 암호화 동작 확인 (문이 열린 뒤에만 켜짐)
-    // crypto_leds[11:0] 전체를 led[15:4]에 한 번에 연결
-    assign led[15:4] = crypto_leds[11:0];
+    assign led[15:10] = crypto_leds[5:0];
+    
+    wire lcd_on, lcd_pedge;
+    assign lcd_on = led[15];
+                
+    edge_detector_n ed(.clk(clk), .reset_p(reset_p), .cp(lcd_on), .p_edge(lcd_pedge));
+    
+    i2c_txtlcd i2c_lcd_text(clk, reset_p, lcd_pedge, scl, sda);
     
 endmodule
 
@@ -291,7 +298,8 @@ module tree_and_rocket_top(
     output [3:0] com,
     // tree display
     output led_r, led_g, led_b,
-    output serial_data, shift_clock, latch_clock
+    output serial_data, shift_clock, latch_clock,
+    output scl, sda
 );
 
     wire bin_to_rocket;                   // rocket 모듈로 갈 버튼 신호
@@ -310,7 +318,9 @@ module tree_and_rocket_top(
         .trig(trig),
         .dht11_data(dht11_data),
         .seg(seg),
-        .com(com)
+        .com(com),
+        .scl(scl),
+        .sda(sda)
         );
     
     led_mode_v2 tree(

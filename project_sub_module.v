@@ -249,3 +249,146 @@ module bin_to_dec(
     end
 
 endmodule
+
+
+module i2c_lcd_send_byte(
+    input clk, reset_p,
+    input [6:0] addr,
+    input [7:0] send_buffer,
+    input send, rs, // rs: 명령어 모드 0 / 데이터 모드 1
+    output scl, sda,
+    output reg busy, // 통신 여부 확인, 통신 중일 때 데이터를 보내면 안되니까
+    output [15:0] led
+);
+
+    localparam IDLE                     = 6'b00_0001;
+    localparam SEND_HIGH_NIBBLE_DISABLE = 6'b00_0010; // nibble은 4bit라고 부름
+    localparam SEND_HIGH_NIBBLE_ENABLE  = 6'b00_0100;
+    localparam SEND_LOW_NIBBLE_DISABLE  = 6'b00_1000;
+    localparam SEND_LOW_NIBBLE_ENABLE   = 6'b01_0000;
+    localparam SEND_DISABLE             = 6'b10_0000;
+    
+    wire clk_usec_nedge;
+    clock_usec usec_clk(.clk(clk), .reset_p(reset_p),
+                        .clk_usec_nedge(clk_usec_nedge));
+                        
+    wire send_pedge;
+    edge_detector_p ed_start(.clk(clk), .reset_p(reset_p),
+                             .cp(send), .p_edge(send_pedge));
+                             
+    reg [21:0] count_usec;
+    reg count_usec_e;
+    // clk_usec_nedge가 들어올 때 카운터시작
+    always @(negedge clk, posedge reset_p) begin
+        if(reset_p) count_usec = 0;
+        else if(clk_usec_nedge && count_usec_e) begin
+            count_usec = count_usec + 1;
+        end
+        else if(!count_usec_e) begin
+            count_usec = 0;
+        end
+    end
+    
+    reg [7:0] data;
+    reg comm_start;
+    wire i2c_busy;
+    I2C_master master(clk, reset_p, addr, data, 1'b0, comm_start, scl, sda, i2c_busy ,led);
+    
+    reg [5:0] state, next_state;
+    // state 변화 FSM
+    always @(negedge clk, posedge reset_p) begin
+        if(reset_p) begin
+            state = IDLE;
+        end
+        else begin
+            state = next_state;
+        end
+    end
+    
+    always @(posedge clk, posedge reset_p) begin
+        if(reset_p) begin
+            next_state = IDLE;
+            comm_start = 0;
+            count_usec_e = 0;
+            data = 0;
+            busy = 0;
+        end
+        else begin
+            case(state)
+                IDLE                     : begin
+                    busy = 0;
+                    // send 클럭이 들어올 때 시작
+                    if(send_pedge) begin
+                        busy = 1;
+                        next_state = SEND_HIGH_NIBBLE_DISABLE;
+                    end
+                end
+                SEND_HIGH_NIBBLE_DISABLE : begin // 상위 4비트 실행 전
+                    if(count_usec >= 22'd200)begin
+                        comm_start = 0;
+                        next_state = SEND_HIGH_NIBBLE_ENABLE;
+                        count_usec_e = 0;
+                    end
+                    else begin
+                                // d7 d6 d5 d4 BL en rw rs
+                        data = {send_buffer[7:4], 3'b100, rs};
+                        comm_start = 1;
+                        count_usec_e = 1;
+                    end
+                end
+                SEND_HIGH_NIBBLE_ENABLE  : begin // 상위 4비트 실행
+                    if(count_usec >= 22'd200) begin
+                        comm_start = 0;
+                        next_state = SEND_LOW_NIBBLE_DISABLE;
+                        count_usec_e = 0;
+                    end
+                    else begin
+                        data = {send_buffer[7:4], 3'b110, rs};
+                        comm_start = 1;
+                        count_usec_e = 1;
+                    end
+                end
+                SEND_LOW_NIBBLE_DISABLE  : begin // 하위 4비트 실행 전
+                    if(count_usec >= 22'd200) begin
+                        comm_start = 0;
+                        next_state = SEND_LOW_NIBBLE_ENABLE;
+                        count_usec_e = 0;
+                    end
+                    else begin
+                        data = {send_buffer[3:0], 3'b100, rs};
+                        comm_start = 1;
+                        count_usec_e = 1;
+                    end
+                end
+                SEND_LOW_NIBBLE_ENABLE   : begin // 하위 4비트 실행 후
+                    if(count_usec >= 22'd200) begin
+                        comm_start = 0;
+                        next_state = SEND_DISABLE;
+                        count_usec_e = 0;
+                    end
+                    else begin
+                        data = {send_buffer[3:0], 3'b110, rs};
+                        comm_start = 1;
+                        count_usec_e = 1;
+                    end
+                end
+                SEND_DISABLE             : begin // 전송이 완료?? 된 상태??
+                    if(count_usec >= 22'd200) begin
+                        comm_start = 0;
+                        next_state = IDLE;
+                        count_usec_e = 0;
+                    end
+                    else begin
+                        data = {send_buffer[3:0], 3'b100, rs};
+                        comm_start = 1;
+                        count_usec_e = 1;
+                    end
+                end
+                default                  : begin
+                    next_state = IDLE;
+                end
+            endcase
+        end
+    end
+
+endmodule
